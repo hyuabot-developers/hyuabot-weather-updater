@@ -1,0 +1,9 @@
+.idea/
+venv/
+*.pyc
+src/hyuabot_weather_updater.egg-info/
+.DS_Store
+
+.eggs/
+
+.python-version
