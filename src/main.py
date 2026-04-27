@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 from datetime import datetime, timedelta
 
 import pytz
@@ -55,15 +56,15 @@ async def execute_script(session):
         weather_icon = '🌨️'
     else:
         weather_icon = '🌧️'
-    korean_weather_notice = f'[날씨] {weather_icon}/현재 온도:{current_weather["T1H"]}℃'
-    english_weather_notice = f'[Weather] {weather_icon}/Temp:{current_weather["T1H"]}℃'
+    korean_weather_notice = f'[날씨] {weather_icon} / 현재 온도:{current_weather["T1H"]}℃'
+    english_weather_notice = f'[Weather] {weather_icon} / Temp:{current_weather["T1H"]}℃'
     if (
         current_weather.get('RN1') is not None and
-        str(current_weather['RN1']).isdigit() and
-        int(current_weather['RN1']) > 0
+        re.match(r"^-?\d+\.\d+$", current_weather['RN1']) and
+        float(current_weather['RN1']) > 0
     ):
-        korean_weather_notice += f'/강수량:{current_weather["RN1"]}mm'
-        english_weather_notice += f'/Rain:{current_weather["RN1"]}mm'
+        korean_weather_notice += f' / 강수량:{current_weather["RN1"]}mm'
+        english_weather_notice += f' / Rain:{current_weather["RN1"]}mm'
     delete_notice_stmt = delete(Notice).where(Notice.category_id == notice_category.category_id)
     insert_notice_stmt = insert(Notice).values([
         {
