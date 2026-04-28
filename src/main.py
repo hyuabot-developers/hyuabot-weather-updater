@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
 from models import NoticeCategory
+from scripts.dust import fetch_dust
 from scripts.weather import fetch_weather
 from utils.database import get_db_engine
 
@@ -26,6 +27,7 @@ async def execute_script(session):
     if notice_category is None:
         return
     fetch_weather(session, notice_category)
+    fetch_dust(session, notice_category)
     session.close()
 
 if __name__ == '__main__':

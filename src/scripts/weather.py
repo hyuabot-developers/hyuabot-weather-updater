@@ -38,7 +38,6 @@ def fetch_weather(session: Session, notice_category: NoticeCategory):
             status_forcelist=[429, 500, 502, 503, 504],
         )
         adapter = HTTPAdapter(max_retries=retry)
-        s.mount('http://', adapter)
         s.mount('https://', adapter)
         weather_response = s.get(url, params=params, timeout=30)
         weather_result = weather_response.json()
