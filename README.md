@@ -147,8 +147,8 @@ Tests run against a PostgreSQL instance at `localhost:25432` (see CI configurati
 ## CI/CD
 
 | Workflow | Trigger | Jobs |
-|----------|---------|------|
-| `default.yml` | Push to any branch except `main` | lint, typecheck, test |
+|---|---|---|
+| `code-check.yml` | Push to any branch except `main` | lint, typecheck, test |
 | `deploy.yml` | PR merged to `main` (or manual dispatch) | Docker build → push to `localhost:5000` |
 
 CI runners are self-hosted (`X64 Linux` for code checks, `ARM64 Linux` for the Docker build).
