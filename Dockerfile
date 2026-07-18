@@ -1,5 +1,5 @@
 FROM python:3.14-alpine AS build
-RUN python3.14 -m pip install --upgrade pip setuptools wheel
+RUN python3.14 -m pip install --upgrade pip "setuptools>=83.0.0" "wheel>=0.47.0"
 
 WORKDIR /app
 COPY setup.cfg .
