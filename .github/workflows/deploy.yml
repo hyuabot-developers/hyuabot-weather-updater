@@ -1,35 +1,27 @@
 name: Deploy Docker Image
+
 on:
   pull_request:
-    branches:
-      - main
-    types:
-      - closed
+    branches: [main]
+    types: [closed]
   workflow_dispatch:
+    inputs:
+      no-cache:
+        description: Build Docker image without using cache
+        required: false
+        default: false
+        type: boolean
+
 jobs:
-  docker-image-build:
-    runs-on: [ self-hosted, ARM64, Linux, 1st ]
-    env:
-      IMAGE_NAME: localhost:5000/hyuabot-weather-updater:latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Set up Docker Build Environment
-        uses: docker/setup-buildx-action@v4
-      - name: Build and push
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: ./Dockerfile
-          load: true
-          tags: ${{ env.IMAGE_NAME }}
-          no-cache: true
-      - name: Push docker image
-        run: |
-          docker push ${{ env.IMAGE_NAME }}
-      - name: Sync image to worker registry
-        uses: hyuabot-developers/hyuabot-infrastructure/.github/actions/sync-local-registry@a091ea37f391ae60eb7828325782a397cc7cae9c
-        with:
-          image: ${{ env.IMAGE_NAME }}
-      - name: Remove docker image
-        run: |
-          docker rmi ${{ env.IMAGE_NAME }}
+  publish:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
+    uses: hyuabot-developers/hyuabot-infrastructure/.github/workflows/publish-immutable-image.yml@09bc374fafc8bf879436d8e2fed94fa178ee2b3d
+    with:
+      image-repository: localhost:5000/hyuabot-weather-updater
+      workload-kind: cronjob
+      workload-name: weather-cron-job
+      container-name: weather-cron-job
+      no-cache: ${{ github.event_name == 'workflow_dispatch' && inputs['no-cache'] }}
+    secrets:
+      RUNNER_ADMIN_TOKEN: ${{ secrets.RUNNER_ADMIN_TOKEN }}
+      FIRST_HOST: ${{ secrets.SSH_HOST || secrets.ORACLE_TRANSFER_TARGET }}
