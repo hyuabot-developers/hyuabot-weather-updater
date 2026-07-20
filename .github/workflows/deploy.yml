@@ -15,7 +15,7 @@ on:
 jobs:
   publish:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
-    uses: hyuabot-developers/hyuabot-infrastructure/.github/workflows/publish-immutable-image.yml@09bc374fafc8bf879436d8e2fed94fa178ee2b3d
+    uses: hyuabot-developers/hyuabot-infrastructure/.github/workflows/publish-immutable-image.yml@accefba87348b747359be6ee4a2ed8d16ca625f6
     with:
       image-repository: localhost:5000/hyuabot-weather-updater
       workload-kind: cronjob
