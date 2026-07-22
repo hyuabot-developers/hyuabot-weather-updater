@@ -6,6 +6,7 @@ from sqlalchemy.orm import sessionmaker
 
 from models import NoticeCategory
 from scripts.dust import fetch_dust
+from scripts.forecast import publish_home_forecast
 from scripts.weather import fetch_weather
 from utils.database import get_db_engine
 
@@ -21,10 +22,15 @@ async def main():
 
 async def execute_script(session):
     logging.info("Start to get weather data.")
+    try:
+        publish_home_forecast()
+    except Exception:
+        logging.exception("Failed to publish the structured home forecast.")
     # 날씨 카테고리 검색
     notice_category_stmt = select(NoticeCategory).where(NoticeCategory.category_name == '날씨')
     notice_category = session.execute(notice_category_stmt).scalar_one_or_none()
     if notice_category is None:
+        session.close()
         return
     fetch_weather(session, notice_category)
     fetch_dust(session, notice_category)
