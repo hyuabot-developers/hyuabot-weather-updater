@@ -22,19 +22,23 @@ async def main():
 
 async def execute_script(session):
     logging.info("Start to get weather data.")
+    forecast_error: Exception | None = None
     try:
         publish_home_forecast()
-    except Exception:
+    except Exception as error:
         logging.exception("Failed to publish the structured home forecast.")
-    # 날씨 카테고리 검색
-    notice_category_stmt = select(NoticeCategory).where(NoticeCategory.category_name == '날씨')
-    notice_category = session.execute(notice_category_stmt).scalar_one_or_none()
-    if notice_category is None:
+        forecast_error = error
+    try:
+        # 날씨 카테고리 검색
+        notice_category_stmt = select(NoticeCategory).where(NoticeCategory.category_name == '날씨')
+        notice_category = session.execute(notice_category_stmt).scalar_one_or_none()
+        if notice_category is not None:
+            fetch_weather(session, notice_category)
+            fetch_dust(session, notice_category)
+    finally:
         session.close()
-        return
-    fetch_weather(session, notice_category)
-    fetch_dust(session, notice_category)
-    session.close()
+    if forecast_error is not None:
+        raise forecast_error
 
 if __name__ == '__main__':
     asyncio.run(main())
