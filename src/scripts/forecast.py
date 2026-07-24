@@ -3,13 +3,15 @@ import logging
 import os
 from collections import Counter
 from datetime import datetime, timedelta
+from statistics import median
 from typing import Any
 
 import pytz
 import redis
-import requests
-from requests.sessions import HTTPAdapter
-from urllib3 import Retry
+
+from scripts.http import retrying_session
+from scripts.observations import WeatherObservation
+from scripts.open_meteo import fetch_all_model_forecasts
 
 
 SERVICE_URL = 'https://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/getVilageFcst'
@@ -18,7 +20,11 @@ SEOUL = pytz.timezone('Asia/Seoul')
 GRID_X = '57'
 GRID_Y = '121'
 DEFAULT_REDIS_KEY = 'weather:home:erica'
+DEFAULT_SHADOW_REDIS_KEY = 'weather:home:erica:shadow'
+DEFAULT_EVALUATION_REDIS_KEY = 'weather:home:erica:evaluation'
 REDIS_TTL_SECONDS = 4 * 60 * 60
+EVALUATION_TTL_SECONDS = 15 * 24 * 60 * 60
+EVALUATION_MAX_ENTRIES = 720
 PAYLOAD_FRESHNESS = timedelta(hours=2)
 
 
@@ -36,19 +42,6 @@ def latest_forecast_base(now: datetime) -> datetime:
     return previous_day.replace(hour=FORECAST_BASE_HOURS[-1], minute=0, second=0, microsecond=0)
 
 
-def _session() -> requests.Session:
-    session = requests.Session()
-    retry = Retry(
-        total=5,
-        read=5,
-        connect=5,
-        backoff_factor=0.5,
-        status_forcelist=[429, 500, 502, 503, 504],
-    )
-    session.mount('https://', HTTPAdapter(max_retries=retry))
-    return session
-
-
 def fetch_village_forecast(now: datetime) -> tuple[datetime, list[dict[str, Any]]]:
     base = latest_forecast_base(now)
     params = {
@@ -61,7 +54,7 @@ def fetch_village_forecast(now: datetime) -> tuple[datetime, list[dict[str, Any]
         'nx': GRID_X,
         'ny': GRID_Y,
     }
-    with _session() as session:
+    with retrying_session() as session:
         response = session.get(SERVICE_URL, params=params, timeout=30)
         response.raise_for_status()
         body = response.json()['response']
@@ -169,16 +162,224 @@ def build_home_forecast(items: list[dict[str, Any]], issued_at: datetime, now: d
     }
 
 
-def publish_home_forecast(now: datetime | None = None) -> dict[str, Any]:
+def _weather_condition(code: int | None) -> str:
+    if code is None:
+        return 'CLOUDY'
+    if code == 0:
+        return 'CLEAR'
+    if code in {1, 2}:
+        return 'MOSTLY_CLOUDY'
+    if code == 3 or 45 <= code <= 48:
+        return 'CLOUDY'
+    if code in {66, 67}:
+        return 'SLEET'
+    if 71 <= code <= 77:
+        return 'SNOW'
+    if 51 <= code <= 65 or 80 <= code <= 82 or code >= 95:
+        return 'RAIN'
+    return 'CLOUDY'
+
+
+def _confidence(agreeing: int, available: int) -> str:
+    if available >= 3 and agreeing == available:
+        return 'HIGH'
+    if agreeing >= 2:
+        return 'MEDIUM'
+    return 'LOW'
+
+
+def build_consensus_forecast(
+    forecasts: list[dict[str, Any]],
+    observation: WeatherObservation,
+    failures: dict[str, str],
+    now: datetime,
+) -> dict[str, Any]:
+    by_time: dict[str, list[dict[str, Any]]] = {}
+    source_status = []
+    for forecast in forecasts:
+        source_status.append({'source': forecast['source'], 'status': 'AVAILABLE'})
+        for hour in forecast['hourly']:
+            forecast_at = datetime.fromisoformat(hour['forecastAt'])
+            if forecast_at.date() == now.date() and forecast_at >= now.replace(minute=0, second=0, microsecond=0):
+                by_time.setdefault(hour['forecastAt'], []).append(hour)
+    source_status.extend(
+        {'source': source, 'status': 'FAILED', 'error': error}
+        for source, error in failures.items()
+    )
+    if not by_time:
+        raise RuntimeError('Model forecasts did not include a remaining forecast for today')
+
+    hourly: list[dict[str, Any]] = []
+    for forecast_at_value in sorted(by_time):
+        entries = by_time[forecast_at_value]
+        temperatures = [entry['temperature'] for entry in entries if entry.get('temperature') is not None]
+        probabilities = [
+            entry['precipitationProbability']
+            for entry in entries
+            if entry.get('precipitationProbability') is not None
+        ]
+        precipitation_entries = [
+            entry for entry in entries
+            if entry.get('precipitationType', 'NONE') != 'NONE'
+            or (entry.get('precipitationAmount') or 0) >= 0.1
+        ]
+        type_counts = Counter(
+            entry.get('precipitationType', 'NONE')
+            for entry in precipitation_entries
+            if entry.get('precipitationType', 'NONE') != 'NONE'
+        )
+        agreeing = len(precipitation_entries)
+        available = len(entries)
+        threshold = 2 if available >= 3 else 1
+        has_precipitation = agreeing >= threshold
+        precipitation_type = (
+            type_counts.most_common(1)[0][0]
+            if has_precipitation and type_counts
+            else 'NONE'
+        )
+        code_counts = Counter(
+            entry.get('weatherCode')
+            for entry in entries
+            if entry.get('weatherCode') is not None
+        )
+        weather_code = code_counts.most_common(1)[0][0] if code_counts else None
+        condition = precipitation_type if precipitation_type != 'NONE' else _weather_condition(weather_code)
+        hourly.append({
+            'forecastAt': forecast_at_value,
+            'temperature': round(median(temperatures), 1) if temperatures else None,
+            'precipitationProbability': round(median(probabilities)) if probabilities else None,
+            'precipitationType': precipitation_type,
+            'condition': condition,
+            'agreeingModelCount': agreeing,
+            'availableModelCount': available,
+            'confidence': _confidence(agreeing, available) if has_precipitation else None,
+        })
+
+    precipitation_hours = [hour for hour in hourly if hour['precipitationType'] != 'NONE']
+    first_precipitation = precipitation_hours[0] if precipitation_hours else None
+    precipitation_end_at = None
+    if first_precipitation is not None:
+        start_index = hourly.index(first_precipitation)
+        final = first_precipitation
+        for hour in hourly[start_index + 1:]:
+            previous_at = datetime.fromisoformat(final['forecastAt'])
+            current_at = datetime.fromisoformat(hour['forecastAt'])
+            if hour['precipitationType'] == 'NONE' or current_at - previous_at > timedelta(hours=1):
+                break
+            final = hour
+        precipitation_end_at = (
+            datetime.fromisoformat(final['forecastAt']) + timedelta(hours=1)
+        ).isoformat()
+
+    temperatures = [hour['temperature'] for hour in hourly if hour.get('temperature') is not None]
+    probabilities = [
+        hour['precipitationProbability']
+        for hour in hourly
+        if hour.get('precipitationProbability') is not None
+    ]
+    primary_condition = (
+        observation.precipitation_type
+        if observation.precipitation_type != 'NONE'
+        else hourly[0]['condition']
+    )
+    end_of_day = now.replace(hour=23, minute=59, second=59, microsecond=0)
+    return {
+        'version': 2,
+        'campus': 'ERICA',
+        'issuedAt': now.isoformat(),
+        'generatedAt': now.isoformat(),
+        'forecastUpdatedAt': now.isoformat(),
+        'expiresAt': min(now + PAYLOAD_FRESHNESS, end_of_day).isoformat(),
+        'date': now.date().isoformat(),
+        'observedAt': observation.observed_at.isoformat(),
+        'currentTemperature': observation.temperature,
+        'currentPrecipitationType': observation.precipitation_type,
+        'currentPrecipitationAmount': observation.precipitation_amount,
+        'minimumTemperature': min(temperatures) if temperatures else None,
+        'maximumTemperature': max(temperatures) if temperatures else None,
+        'precipitationProbabilityMax': max(probabilities, default=0),
+        'precipitationStartAt': first_precipitation['forecastAt'] if first_precipitation else None,
+        'precipitationEndAt': precipitation_end_at,
+        'precipitationType': first_precipitation['precipitationType'] if first_precipitation else 'NONE',
+        'precipitationConfidence': first_precipitation['confidence'] if first_precipitation else None,
+        'availableModelCount': len(forecasts),
+        'agreeingModelCount': first_precipitation['agreeingModelCount'] if first_precipitation else 0,
+        'primaryCondition': primary_condition,
+        'sources': source_status,
+        'hourly': hourly,
+        'attribution': 'Weather forecast data by Open-Meteo.com',
+    }
+
+
+def publish_home_forecast(
+    now: datetime | None = None,
+    observation: WeatherObservation | None = None,
+) -> dict[str, Any]:
     current_time = now or datetime.now(SEOUL)
     issued_at, items = fetch_village_forecast(current_time)
-    payload = build_home_forecast(items, issued_at, current_time)
+    legacy_payload = build_home_forecast(items, issued_at, current_time)
+    current_observation = observation
+    if current_observation is None:
+        from scripts.observations import fetch_kma_observation
+        current_observation = fetch_kma_observation(current_time)
+    forecasts, failures = fetch_all_model_forecasts()
+    ensemble_payload = build_consensus_forecast(
+        forecasts,
+        current_observation,
+        failures,
+        current_time,
+    )
     client = redis.Redis(
         host=os.getenv('REDIS_HOST', 'localhost'),
         port=int(os.getenv('REDIS_PORT', '6379')),
         decode_responses=True,
     )
     key = os.getenv('WEATHER_FORECAST_REDIS_KEY', DEFAULT_REDIS_KEY)
-    client.set(key, json.dumps(payload, ensure_ascii=False, separators=(',', ':')), ex=REDIS_TTL_SECONDS)
-    logging.info('Published structured home forecast from %s to %s.', issued_at.isoformat(), key)
-    return payload
+    shadow_key = os.getenv('WEATHER_FORECAST_SHADOW_REDIS_KEY', DEFAULT_SHADOW_REDIS_KEY)
+    evaluation_key = os.getenv('WEATHER_FORECAST_EVALUATION_REDIS_KEY', DEFAULT_EVALUATION_REDIS_KEY)
+    mode = os.getenv('HOME_WEATHER_ENSEMBLE_MODE', 'shadow').lower()
+    primary_payload = ensemble_payload if mode == 'active' else legacy_payload
+    client.set(
+        key,
+        json.dumps(primary_payload, ensure_ascii=False, separators=(',', ':')),
+        ex=REDIS_TTL_SECONDS,
+    )
+    client.set(
+        shadow_key,
+        json.dumps(ensemble_payload, ensure_ascii=False, separators=(',', ':')),
+        ex=REDIS_TTL_SECONDS,
+    )
+    evaluation = {
+        'generatedAt': current_time.isoformat(),
+        'observation': {
+            'observedAt': current_observation.observed_at.isoformat(),
+            'temperature': current_observation.temperature,
+            'precipitationType': current_observation.precipitation_type,
+            'precipitationAmount': current_observation.precipitation_amount,
+        },
+        'legacy': {
+            'precipitationStartAt': legacy_payload['precipitationStartAt'],
+            'precipitationType': legacy_payload['precipitationType'],
+        },
+        'ensemble': {
+            'precipitationStartAt': ensemble_payload['precipitationStartAt'],
+            'precipitationType': ensemble_payload['precipitationType'],
+            'precipitationConfidence': ensemble_payload['precipitationConfidence'],
+            'availableModelCount': ensemble_payload['availableModelCount'],
+            'agreeingModelCount': ensemble_payload['agreeingModelCount'],
+        },
+        'failures': failures,
+    }
+    client.lpush(
+        evaluation_key,
+        json.dumps(evaluation, ensure_ascii=False, separators=(',', ':')),
+    )
+    client.ltrim(evaluation_key, 0, EVALUATION_MAX_ENTRIES - 1)
+    client.expire(evaluation_key, EVALUATION_TTL_SECONDS)
+    logging.info(
+        'Published %s home forecast to %s and ensemble diagnostics to %s.',
+        mode,
+        key,
+        shadow_key,
+    )
+    return primary_payload

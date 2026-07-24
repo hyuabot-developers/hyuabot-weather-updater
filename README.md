@@ -1,23 +1,25 @@
 # hyuabot-weather-updater
 
-A batch job that fetches real-time weather observations from the Korea Meteorological Administration (KMA) open API and writes bilingual (Korean/English) weather notices into the HYUabot PostgreSQL database.
+A batch job that combines Korea Meteorological Administration (KMA) observations with JMA, ECMWF, and GFS forecasts and publishes weather data for HYUabot.
 
 ## Overview
 
 The updater runs as a one-shot process (designed for a CronJob or similar scheduler). On each run it:
 
-1. Looks up the `날씨` (Weather) notice category in the database.
-2. Calls the KMA Ultra-Short-Term Observation API (`getUltraSrtNcst`) for the grid point covering Hanyang University ERICA campus (`nx=57, ny=121`).
-3. Extracts three observation values:
+1. Calls the KMA Ultra-Short-Term Observation API (`getUltraSrtNcst`) once for the grid point covering Hanyang University ERICA campus (`nx=57, ny=121`).
+2. Fetches the JMA MSM, ECMWF IFS 0.25°, and GFS global forecasts through Open-Meteo.
+3. Normalizes each hourly forecast and treats precipitation as expected when a majority of available models agree.
+4. Publishes the existing KMA forecast to the primary Redis key and the ensemble to a shadow key by default.
+5. Stores bounded comparison records in Redis for 15 days.
+6. Updates the existing bilingual database notices from the same KMA observation.
+
+   The KMA observation includes:
 
    | Code  | Meaning                                                |
    |-------|--------------------------------------------------------|
    | `PTY` | Precipitation type (0=clear, 2=snow/sleet, other=rain) |
    | `T1H` | Current temperature (°C)                               |
    | `RN1` | Hourly precipitation (mm)                              |
-
-4. Builds a short notice string in both Korean and English, appending rainfall amount when non-zero.
-5. Deletes all existing weather notices for that category and inserts the two new ones, each expiring in 1 hour.
 
 ### Example output
 
@@ -75,6 +77,12 @@ src/
 | `POSTGRES_HOST`     | PostgreSQL host           |
 | `POSTGRES_PORT`     | PostgreSQL port           |
 | `POSTGRES_DB`       | PostgreSQL database name  |
+| `REDIS_HOST` | Redis host |
+| `REDIS_PORT` | Redis port |
+| `WEATHER_FORECAST_REDIS_KEY` | Active app payload key; defaults to `weather:home:erica` |
+| `WEATHER_FORECAST_SHADOW_REDIS_KEY` | Ensemble payload key; defaults to `weather:home:erica:shadow` |
+| `WEATHER_FORECAST_EVALUATION_REDIS_KEY` | Rolling comparison list; defaults to `weather:home:erica:evaluation` |
+| `HOME_WEATHER_ENSEMBLE_MODE` | `shadow` (default) or `active` |
 
 ## Running Locally
 
@@ -157,6 +165,7 @@ CI runners are self-hosted (`X64 Linux` for code checks, `ARM64 Linux` for the D
 
 - The base time sent to the KMA API is the current hour when `minute > 15`, otherwise the previous hour. This accounts for the ~10-minute publication delay of KMA observation data.
 - The updater does nothing and exits cleanly if no `날씨` category row exists in the database.
+- Open-Meteo model requests do not require an API key for eligible non-commercial use. Forecast payloads include the required Open-Meteo attribution.
 
 ## License
 

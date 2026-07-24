@@ -12,10 +12,12 @@ def test_execute_script_propagates_home_forecast_failure(monkeypatch):
     session.execute.return_value.scalar_one_or_none.return_value = notice_category
     fetch_weather = Mock()
     fetch_dust = Mock()
+    observation = object()
 
-    def fail_to_publish():
+    def fail_to_publish(observation):
         raise RuntimeError('forecast publish failed')
 
+    monkeypatch.setattr(main, 'fetch_kma_observation', Mock(return_value=observation))
     monkeypatch.setattr(main, 'publish_home_forecast', fail_to_publish)
     monkeypatch.setattr(main, 'fetch_weather', fetch_weather)
     monkeypatch.setattr(main, 'fetch_dust', fetch_dust)
@@ -23,6 +25,6 @@ def test_execute_script_propagates_home_forecast_failure(monkeypatch):
     with pytest.raises(RuntimeError, match='forecast publish failed'):
         asyncio.run(main.execute_script(session))
 
-    fetch_weather.assert_called_once_with(session, notice_category)
+    fetch_weather.assert_called_once_with(session, notice_category, observation)
     fetch_dust.assert_called_once_with(session, notice_category)
     session.close.assert_called_once_with()
