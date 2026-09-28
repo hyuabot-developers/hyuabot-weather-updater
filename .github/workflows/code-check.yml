@@ -8,7 +8,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     steps:
     - uses: actions/checkout@v7
     - name: Set up Python 3.12
@@ -33,7 +33,7 @@ jobs:
         fi
         python -m flake8 src/ tests
   typecheck:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     steps:
     - uses: actions/checkout@v7
     - name: Set up Python 3.12
