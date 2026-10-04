@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 from collections import Counter
 from datetime import datetime, timedelta
 from statistics import median
@@ -43,9 +44,12 @@ def latest_forecast_base(now: datetime) -> datetime:
 
 
 def fetch_village_forecast(now: datetime) -> tuple[datetime, list[dict[str, Any]]]:
+    api_key = os.getenv('WEATHER_API_KEY')
+    if not api_key:
+        raise ValueError('WEATHER_API_KEY is not set')
     base = latest_forecast_base(now)
     params = {
-        'serviceKey': os.environ['WEATHER_API_KEY'],
+        'serviceKey': api_key,
         'pageNo': '1',
         'numOfRows': '1000',
         'dataType': 'JSON',
@@ -81,6 +85,20 @@ def _precipitation_type(value: Any) -> str:
         '6': 'SLEET',
         '7': 'SNOW',
     }.get(str(value), 'NONE')
+
+
+def _snow_amount(value: Any) -> float | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text == '적설없음':
+        return 0.0
+    if '미만' in text:
+        return 0.5
+    match = re.search(r'(-?\d+(?:\.\d+)?)\s*cm', text)
+    if match:
+        return float(match.group(1))
+    return _number(value)
 
 
 def _sky_condition(value: Any) -> str:
@@ -120,6 +138,13 @@ def build_home_forecast(items: list[dict[str, Any]], issued_at: datetime, now: d
             hour['precipitationProbability'] = int(float(value))
         elif category == 'PCP':
             hour['precipitationAmount'] = _number(value)
+        elif category == 'REH':
+            number = _number(value)
+            hour['humidity'] = int(number) if number is not None else None
+        elif category == 'WSD':
+            hour['windSpeed'] = _number(value)
+        elif category == 'SNO':
+            hour['snowAmount'] = _snow_amount(value)
 
     current_hour = now.replace(minute=0, second=0, microsecond=0)
     all_today = [hourly_by_time[key] for key in sorted(hourly_by_time)]
@@ -142,6 +167,7 @@ def build_home_forecast(items: list[dict[str, Any]], issued_at: datetime, now: d
         primary_condition = conditions.most_common(1)[0][0]
 
     probabilities = [hour.get('precipitationProbability', 0) for hour in remaining]
+    snow_amounts = [hour['snowAmount'] for hour in remaining if hour.get('snowAmount') is not None]
     current_temperature = remaining[0].get('temperature')
     end_of_day = now.replace(hour=23, minute=59, second=59, microsecond=0)
     return {
@@ -158,6 +184,9 @@ def build_home_forecast(items: list[dict[str, Any]], issued_at: datetime, now: d
         'precipitationStartAt': first_precipitation['forecastAt'] if first_precipitation else None,
         'precipitationType': first_precipitation['precipitationType'] if first_precipitation else 'NONE',
         'primaryCondition': primary_condition,
+        'humidity': remaining[0].get('humidity'),
+        'windSpeed': remaining[0].get('windSpeed'),
+        'snowAmount': max(snow_amounts) if snow_amounts else None,
         'hourly': remaining,
     }
 
@@ -314,6 +343,7 @@ def build_consensus_forecast(
 def publish_home_forecast(
     now: datetime | None = None,
     observation: WeatherObservation | None = None,
+    extras: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     current_time = now or datetime.now(SEOUL)
     issued_at, items = fetch_village_forecast(current_time)
@@ -329,6 +359,14 @@ def publish_home_forecast(
         failures,
         current_time,
     )
+    observation_fields = {
+        'humidity': current_observation.humidity,
+        'windSpeed': current_observation.wind_speed,
+    }
+    for payload in (legacy_payload, ensemble_payload):
+        payload.update({key: value for key, value in observation_fields.items() if value is not None})
+        if extras:
+            payload.update(extras)
     client = redis.Redis(
         host=os.getenv('REDIS_HOST', 'localhost'),
         port=int(os.getenv('REDIS_PORT', '6379')),
