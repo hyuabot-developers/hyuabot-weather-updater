@@ -1,0 +1,12 @@
+{
+  "response": {
+    "header": { "resultCode": "00" },
+    "body": {
+      "items": {
+        "item": [
+          { "title": "[안산] 호우주의보 발표", "tmFc": "202610041030", "stnId": "119" }
+        ]
+      }
+    }
+  }
+}

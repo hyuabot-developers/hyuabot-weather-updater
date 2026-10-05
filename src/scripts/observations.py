@@ -20,6 +20,8 @@ class WeatherObservation:
     temperature: float | None
     precipitation_type: str
     precipitation_amount: float | None
+    humidity: int | None = None
+    wind_speed: float | None = None
 
 
 def _number(value: Any) -> float | None:
@@ -48,9 +50,12 @@ def latest_observation_base(now: datetime) -> datetime:
 
 def fetch_kma_observation(now: datetime | None = None) -> WeatherObservation:
     current_time = now or datetime.now(SEOUL)
+    api_key = os.getenv('WEATHER_API_KEY')
+    if not api_key:
+        raise ValueError('WEATHER_API_KEY is not set')
     base = latest_observation_base(current_time)
     params = {
-        'serviceKey': os.environ['WEATHER_API_KEY'],
+        'serviceKey': api_key,
         'pageNo': '1',
         'numOfRows': '100',
         'dataType': 'JSON',
@@ -69,11 +74,13 @@ def fetch_kma_observation(now: datetime | None = None) -> WeatherObservation:
     values = {
         item['category']: item['obsrValue']
         for item in body['body']['items']['item']
-        if item['category'] in {'PTY', 'T1H', 'RN1'}
+        if item['category'] in {'PTY', 'T1H', 'RN1', 'REH', 'WSD'}
     }
     return WeatherObservation(
         observed_at=base,
         temperature=_number(values.get('T1H')),
         precipitation_type=_precipitation_type(values.get('PTY')),
         precipitation_amount=_number(values.get('RN1')),
+        humidity=int(float(values['REH'])) if _number(values.get('REH')) is not None else None,
+        wind_speed=_number(values.get('WSD')),
     )
